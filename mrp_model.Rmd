@@ -1,0 +1,100 @@
+---
+title: "MRP model"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r, echo = FALSE}
+#library(nlme)
+#library(lme4)
+library(arm)
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(tidyr)
+```
+
+
+```{r load_data}
+voters <- read.csv('data/voters.csv')
+census <- read.csv('data/census_clean.csv')
+voters$age_gender <- as.factor(paste0(voters$age_range, "_", voters$gender))
+voters$labor <- ifelse(voters$party == 'ALP', 1, 0)
+
+voters$age_gender <- factor(voters$age_gender)
+census$age_gender <- factor(census$age_gender)
+
+voters <- tbl_df(voters)
+census <- tbl_df(census)
+
+results <- read_csv('data/results_2010_aec.csv') %>%
+  left_join(read_csv('data/results_2013_aec.csv'), by = "Division") %>%
+  select(electorate = Division, alp2010 = ALP.x, alp2013 = ALP.y)
+
+voters <- voters %>% left_join(results)
+
+census <- census %>% left_join(results) %>% select(-alp2013)
+```
+
+```{r}
+fit2 <- glmer(labor ~ alp2010 + (1|age_gender) + (1|state) + (1|electorate),
+              data = voters, family = binomial(link = "logit"))
+
+cellpred <- invlogit(fixef(fit2)["(Intercept)"] +
+                     ranef(fit2)$electorate[census$electorate,] +
+                     ranef(fit2)$age_gender[census$age_gender,] +
+                     ranef(fit2)$state[census$state,] +
+                     (fixef(fit2)["alp2010"] * census$alp2010))
+
+# set NA random effects to 0
+cellpred[is.na(cellpred)] <- 0
+```
+
+```{r}
+weighted_cell_pred <- cellpred * census$prop
+
+electorate_preds <- data.frame(electorate = census$electorate,
+                               weighted_ALP = weighted_cell_pred) %>%
+  group_by(electorate) %>%
+  summarise(weighted_alp = sum(weighted_ALP)) %>%
+  arrange(desc(weighted_alp))
+```
+
+```{r}
+
+eps <- electorate_preds %>%
+  left_join(results) %>%
+  mutate(weighted_alp = weighted_alp * 100, uniform_swing = alp2010 - 4.61) %>%
+  select(electorate, prediction = weighted_alp, uniform_swing, alp2013) %>%
+  gather(category, value, -electorate, -alp2013)
+ggplot(eps, aes(value, alp2013, colour = category)) + geom_point() + geom_smooth(method = "lm") +
+  theme_bw() +
+  labs(y = '2013 ALP Primary Vote', x = 'Predicted Value', colour = 'Legend',
+       title = 'MRP model vs Uniform Swing 2013 election') +
+  theme(panel.grid.minor = element_blank())
+
+```
+
+```{r}
+errors <- eps %>%
+  spread(category, value) %>%
+  mutate(prediction_error = abs(alp2013 - prediction), us_error = abs(alp2013 - uniform_swing))
+
+errors %>% summarise(mean(prediction_error), mean(us_error))
+```
+
+
+```{r}
+lm_fit1 <- eps %>% filter(category == 'prediction') %>% lm(alp2013 ~ value, data = .)
+lm_fit2 <- eps %>% filter(category == 'uniform_swing') %>% lm(alp2013 ~ value, data = .)
+
+
+
+df <- data.frame(predictions = sqrt(residuals(lm_fit1) ^ 2),
+                 unif_swig = sqrt(residuals(lm_fit2) ^ 2)) %>%
+  gather(category, value)
+
+
+ggplot(df, aes(value, colour = category)) + geom_density()
+```
